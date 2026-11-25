@@ -1,76 +1,71 @@
 # BigMart Sales Analysis
 
-Predicting product sales across BigMart retail outlets using regression analysis on the classic BigMart Sales dataset.
+Predicting product sales (`Item_Outlet_Sales`) across BigMart retail outlets using a leak-free multivariate linear regression pipeline on the BigMart Sales dataset.
 
-##  Objective
+## Objective
 
-BigMart collects daily sales data for various products across 10 stores in different cities. The goal of this project is to:
-- Identify which product and outlet attributes most influence sales
-- Build a regression model to predict `Item_Outlet_Sales` for products at each outlet
-- Understand which features can be dropped without meaningfully hurting model performance
+BigMart collects product-level sales data across 10 retail outlets of varying sizes, formats, and city tiers. The goal of this project is to:
+- Identify which product and outlet attributes most strongly drive `Item_Outlet_Sales`
+- Build a statistically valid, leak-free OLS / Linear Regression model
+- Address core linear regression assumptions (heteroscedasticity and multicollinearity)
+- Find the smallest, most interpretable feature subset that generalizes best on unseen holdout data (Occam's Razor)
 
-##  Dataset
+## Dataset
 
-The dataset is the well-known **BigMart Sales** dataset (originally from an Analytics Vidhya hackathon).
-
-| File | Rows | Description |
-|---|---|---|
-| `Train.csv` | 8,523 | Labeled data, includes `Item_Outlet_Sales` (target) |
-| `Test.csv` | 5,681 | Unlabeled data, target withheld |
-
-**Columns:**
+The project uses `Train1.csv` from the **BigMart Sales** dataset (**8,523 rows × 12 columns**), split **80/20** (`6,818` training / `1,705` unseen holdout test rows, `random_state=42`) **before any preprocessing** to prevent data leakage.
 
 | Column | Type | Description |
 |---|---|---|
-| `Item_Identifier` | Categorical | Unique product ID (1,559 distinct items) |
-| `Item_Weight` | Numeric | Weight of the product (~17% missing) |
-| `Item_Fat_Content` | Categorical | Low Fat / Regular (inconsistently labeled) |
-| `Item_Visibility` | Numeric | % of display area allotted to the item |
+| `Item_Identifier` | Categorical | Unique product ID (`1,559` distinct items) |
+| `Item_Weight` | Numeric | Weight of the product (`1,463` missing, ~17.2%) |
+| `Item_Fat_Content` | Categorical | Low Fat / Regular (dirty labels: `LF`, `low fat`, `reg`) |
+| `Item_Visibility` | Numeric | % of display area allotted to the item (`526` zero anomalies) |
 | `Item_Type` | Categorical | 16 product categories |
 | `Item_MRP` | Numeric | Maximum Retail Price |
-| `Outlet_Identifier` | Categorical | Unique store ID (10 stores) |
-| `Outlet_Establishment_Year` | Numeric | Year the store was established |
-| `Outlet_Size` | Categorical | Small / Medium / High (missing values present) |
+| `Outlet_Identifier` | Categorical | Unique store ID (`10` stores) |
+| `Outlet_Establishment_Year` | Numeric | Year the store was established (`9` distinct years) |
+| `Outlet_Size` | Categorical | Small / Medium / High (`2,410` missing, ~28.3%) |
 | `Outlet_Location_Type` | Categorical | Tier 1 / Tier 2 / Tier 3 city |
 | `Outlet_Type` | Categorical | Grocery Store / Supermarket Type 1, 2, 3 |
 | `Item_Outlet_Sales` | Numeric (Target) | Sales of the product at that store |
 
+## Pipeline (8 Stages)
 
-##  Data Cleaning
+1. **Data Loading & Exploration + Train–Test Split**: Schema, missingness, cardinality, anomaly checks, and an 80/20 holdout split *before* preprocessing.
+2. **Data Cleaning & Imputation (Fit on Train Only)**:
+   - Missing `Item_Weight` → imputed with training mean per `Item_Identifier` (fallback to overall training mean).
+   - Missing `Outlet_Size` → imputed with training mode per `Outlet_Type`.
+   - `Item_Visibility == 0` → replaced with training mean of non-zero visibility values.
+   - `Item_Fat_Content` → standardized (`LF`, `low fat` → `Low Fat`; `reg` → `Regular`).
+3. **Feature Engineering**:
+   - `New_Item_Type` → extracted from first 2 characters of `Item_Identifier` (`FD` → `Food`, `NC` → `Non-consumable`, `DR` → `Drinks`).
+   - `Age_of_Outlet` → `2013 - Outlet_Establishment_Year`.
+   - Dropped raw IDs and redundant columns (`Item_Identifier`, `Outlet_Identifier`, `Outlet_Establishment_Year`, `Item_Type`).
+4. **Encoding & Correlation**:
+   - Proper One-Hot Encoding (`pd.get_dummies(..., dtype=float)`) for all nominal categoricals (no `LabelEncoder` on nominal IDs), dropping one explicit reference level per category → **14 clean features**.
+   - Test columns aligned via `.reindex(..., fill_value=0.0)`.
+5. **Target Transformation**:
+   - Natural log transformation (`ln(Item_Outlet_Sales)`) to address right-skewness and heteroscedasticity observed in raw residuals.
+6. **Modeling & Diagnostics**:
+   - Leak-free **5-fold cross-validation** using a custom scikit-learn `BigMartPreprocessor` inside a `Pipeline`.
+   - Full OLS summary via `statsmodels` and **proper iterative VIF pruning** (with intercept constant included via `sm.add_constant`) until all remaining features have `VIF <= 5`.
+7. **Feature Selection & Final Choice**:
+   - Compared single-regressor baselines, incremental subsets, leak-free `SelectKBest(f_regression, k=4)`, and the complete 4-feature group (`Item_MRP` + 3 `Outlet_Type` dummies; all VIFs ≤ 2.38).
+8. **Holdout Test Validation & Residual Diagnostics**:
+   - Apples-to-apples comparison on the **original currency scale** using **Duan's smearing estimator** (learned strictly from training residuals) to back-transform log predictions.
+   - 4-panel residual diagnostic suite on the final 4-feature model (Residuals vs. Fitted for Raw vs. Log, Normal Q-Q Plot, and Holdout Actual vs. Predicted Sales).
 
-- **Missing `Item_Weight`** → filled using the mean weight of the same `Item_Identifier` across other stores; any item with no known weight anywhere filled with the overall column mean.
-- **Missing `Outlet_Size`** → filled using the mode `Outlet_Size` within each `Outlet_Type` group.
-- **`Item_Visibility` = 0** → replaced with the mean visibility computed from non-zero rows only (a visibility of 0 isn't physically meaningful for a stocked product).
-- **Inconsistent `Item_Fat_Content` labels** (`LF`, `reg`, `low fat`, `Low Fat`, `Regular`) → standardized into two clean categories.
+## Holdout Results (`1,705` Unseen Test Rows)
 
-##  Feature Engineering
+| Model | Features | 5-Fold CV Log RMSE | Test Log R² | Test Orig R² | Test Orig RMSE | Test Orig MAE | Neg. Preds | AIC |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Full Model (Log) | 14 | 0.5400 | 0.7296 | 0.5549 | 1,099.83 | 754.54 | 0 | 10,952.9 |
+| VIF-Pruned Model (Log) | 12 | 0.5410 | 0.7267 | 0.5491 | 1,107.08 | 760.77 | 0 | 10,976.4 |
+| SelectKBest `k=4` (Log) | 4 | 0.5642 | 0.7018 | 0.5151 | 1,148.05 | 800.31 | 0 | 11,548.6 |
+| **Final Top-4 Model (Log + Smearing)** | **4** | **0.5399** | **0.7295** | **0.5571** | **1,097.21** | **753.61** | **0** | **10,944.1** |
+| Top-4 Model (Raw Target, No Log) | 4 | — | — | 0.5801 | 1,068.28 | 791.22 | 93 | 115,387.7 |
 
-- `New_Item_Type` — derived from the first two letters of `Item_Identifier` (`FD`/`NC`/`DR`) → mapped to Food / Non-consumable / Drinks
-- `Age_of_Outlet` — computed as `2013 - Outlet_Establishment_Year`
-- One-hot encoding (`pd.get_dummies`) for all categorical variables, with one category dropped per variable to avoid the dummy variable trap
-- Label encoding used as an alternate representation for exploratory correlation analysis
+## Conclusion
 
-## Modeling Approach
-
-- **scikit-learn `LinearRegression`** — fitting, prediction, cross-validated MSE/R²
-- **statsmodels `OLS`** — detailed coefficient significance (p-values, confidence intervals)
-- **Log-transform** applied to the target variable to correct heteroscedasticity in residuals
-- **Variance Inflation Factor (VIF)** used to detect and remove multicollinear features
-- **Manual feature subset testing** (1, 2, 3, 4, 6-variable combinations) to find the smallest set preserving most predictive power
-- **`SelectKBest` (k=4)** used as an algorithmic cross-check against the manually selected features
-
-##  Results
-
-| Model | R² | CV MSE | Features |
-|---|---|---|---|
-| Full feature set (log-transformed target) | 0.7206 | 0.2901 | 16 |
-| After VIF-based feature removal | 0.7200 | 0.2908 | 15 |
-| SelectKBest (k=4) | 0.6943 | 0.3166 | 4 |
-| Manually selected 4-feature model | ≈0.72 | — | 4 |
-| Without log-transform (raw sales) | 0.5620 | 1,277,054 | 4 |
-
-
-##  Conclusion
-
-Just 4 features — `Item_MRP` and 3 `Outlet_Type` dummy variables — explain nearly as much variance in sales as the full 16-feature model. Log-transforming the target had a bigger impact on model quality (R² 0.72 vs 0.56) than adding extra features, confirming that correcting for heteroscedasticity mattered more than feature count.
-
+- **Occam's Razor Confirmed**: Just **4 features** — `Item_MRP` and the 3 `Outlet_Type` dummy variables (`Grocery Store`, `Supermarket Type1`, `Supermarket Type2`, with `Supermarket Type3` as reference) — outperform the full 14-feature model on leak-free CV Log RMSE (`0.5399`), holdout RMSE (`1,097.21`), holdout MAE (`753.61`), and AIC (`10,944.1`), with zero multicollinearity (`VIF <= 2.38`).
+- **Why Log Transformation Wins in Practice**: While raw OLS yields a slightly lower original-scale RMSE (`1,068.28`) by directly minimizing raw squared error, it suffers from severe heteroscedasticity, worse MAE (`791.22` vs. `753.61`), and produces **93 impossible negative sales predictions** (down to `-1,341.81`). The log-linear model with Duan's smearing stabilizes error variance, improves MAE, and guarantees strictly positive sales predictions (`0` negatives).
